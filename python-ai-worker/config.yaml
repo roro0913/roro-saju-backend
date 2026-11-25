@@ -1,0 +1,67 @@
+# python-ai-worker 기본 설정
+# 우선순위: 환경변수(FORTUNE_*) > 이 파일 > 코드 기본값
+#   예) FORTUNE_KAFKA__BOOTSTRAP_SERVERS=localhost:29092
+#       FORTUNE_REDIS__URL=redis://localhost:6379/1
+service:
+  name: python-ai-worker
+  env: local
+  log_level: INFO
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+kafka:
+  bootstrap_servers: kafka:9092      # docker-compose 내부 주소 (호스트에서 직접 띄울 때는 localhost:29092)
+  topic: fortune.paid
+  dlq_topic: fortune.paid.dlq
+  group_id: fortune-ai-worker
+  auto_offset_reset: earliest
+  # 동시에 처리할 최대 메시지 수 (Semaphore 로 제한) - LLM 호출은 I/O 바운드라 이 값으로 처리량이 결정된다.
+  max_concurrency: 8
+  # 한 번 poll 에서 가져올 최대 레코드 수 (max_concurrency 의 2배 권장)
+  max_poll_records: 16
+  poll_timeout_ms: 1000
+  session_timeout_ms: 30000
+  max_poll_interval_ms: 300000
+  # 처리 도중 죽었을 때 재처리되지 않도록 수동 커밋 + 순서 보장 트래커 사용
+  enable_auto_commit: false
+
+retry:
+  # 최초 시도 포함 총 시도 횟수 (3 = 최초 1 + 재시도 2)
+  max_attempts: 3
+  initial_backoff_ms: 200
+  max_backoff_ms: 5000
+  multiplier: 2.0
+  jitter_ratio: 0.2
+
+redis:
+  url: redis://redis:6379/1
+  # 생성 결과 보관 기간(조회 API 응답): 7일
+  reading_ttl_seconds: 604800
+  # 동일 입력(생년월일시+운세타입) LLM 결과 캐시: 30일
+  cache_ttl_seconds: 2592000
+  # Kafka 중복 전달 방어용 eventId 키: 7일
+  dedupe_ttl_seconds: 604800
+
+llm:
+  # mock | http  (mock 은 외부 호출 없이 결정적 결과를 만든다. 토큰/지연 없이 캐시 동작을 검증할 때 사용)
+  provider: mock
+  model: fortune-mock-v1
+  timeout_seconds: 20
+  temperature: 0.7
+  # provider=http 일 때만 사용. 비워두면 mock 으로 폴백한다.
+  endpoint: ""
+  api_key: ""
+  # 동일 입력 캐시 사용 여부 (false 로 두면 매번 LLM 호출)
+  cache_enabled: true
+
+internal_api:
+  # AI 워커가 주문 상태를 바꿀 때 호출하는 spring-core 내부 API
+  base_url: http://spring-core:8080
+  token: local-internal-token
+  timeout_seconds: 3
+
+fault_injection:
+  # 운세 타입이 이 값이면 처리 실패를 강제로 발생시킨다 (DLQ/재시도 동작 검증용). 비우면 비활성.
+  fail_fortune_type: CRASH_TEST

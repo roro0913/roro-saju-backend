@@ -1,0 +1,145 @@
+# spring-core 설정
+# 환경변수로 덮어쓴다(docker-compose 참고). 기본값은 compose 네트워크 기준이다.
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  tomcat:
+    # 트래픽 급증 대응: 요청을 받아둘 큐(accept-count)와 커넥션 상한을 명시한다.
+    # 스레드가 무한정 늘면 DB 커넥션 풀(20)과의 대기열만 길어져 지연이 폭발하므로,
+    # 스레드(200) ≥ DB 풀(20) × 평균 점유 시간 의 관계를 감안해 보수적으로 잡는다.
+    threads:
+      max: 200
+      min-spare: 20
+    max-connections: 8192
+    accept-count: 200
+    connection-timeout: 5s
+    keep-alive-timeout: 20s
+    max-http-form-post-size: 2MB
+  compression:
+    enabled: true
+
+spring:
+  application:
+    name: spring-core
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://postgres:5432/fortune}
+    username: ${DB_USERNAME:fortune}
+    password: ${DB_PASSWORD:fortune}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: fortune-hikari
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+      minimum-idle: 5
+      # 커넥션을 기다리다 스레드가 무한 대기하지 않도록 짧게 끊는다(빠른 실패 → 429/503).
+      connection-timeout: 3000
+      validation-timeout: 1000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      keepalive-time: 120000
+      leak-detection-threshold: 20000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate      # 스키마는 Flyway 가 소유한다.
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+        jdbc.batch_size: 30
+        order_inserts: true
+        order_updates: true
+        query.in_clause_parameter_padding: true
+    show-sql: false
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      timeout: 1s
+      connect-timeout: 1s
+      lettuce:
+        pool:
+          max-active: 32
+          max-idle: 16
+          min-idle: 4
+          max-wait: 500ms
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:kafka:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # acks=all + 멱등 프로듀서: 브로커 재시도에도 중복/유실 없이 한 번만 기록된다.
+      acks: all
+      retries: 2147483647
+      batch-size: 16384
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        compression.type: lz4
+        linger.ms: 5
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 5000
+    admin:
+      fail-fast: false
+
+fortune:
+  idempotency:
+    lock-ttl: 10s          # 처리 중 락. 프로세스가 죽으면 이 시간 뒤 자동 회수.
+    record-ttl: 24h        # 완료 응답 보관(재요청 재생 기간)
+    key-max-length: 128
+    cleanup-cron: "0 17 4 * * *"
+
+  rate-limit:
+    enabled: true
+    requests-per-window: ${RATE_LIMIT_REQUESTS:100}
+    window: 1s
+    fail-open: true        # Redis 장애 시 결제 가용성 우선(경보로 대체)
+    path-prefixes:
+      - /api/v1
+
+  internal:
+    token: ${INTERNAL_API_TOKEN:local-internal-token}
+
+  outbox:
+    relay-interval-ms: 500
+    batch-size: 50
+    max-attempts: 5
+    base-backoff: 5s
+
+  kafka:
+    topic: fortune.paid
+    dlq-topic: fortune.paid.dlq
+    partitions: 3
+    replicas: 1
+    send-timeout: 10s
+
+  reading:
+    status-ttl: 7d
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    com.fortune.core: INFO
+    org.apache.kafka: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

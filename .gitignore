@@ -1,0 +1,13 @@
+# Java
+spring-core/target/
+*.class
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# 기타
+.env
+.DS_Store

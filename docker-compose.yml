@@ -1,0 +1,163 @@
+# 사주 MSA 백엔드 — 로컬 실행용
+#
+#   docker compose up -d --build
+#   docker compose logs -f spring-core python-ai-worker
+#
+# 호스트에서 직접 실행할 때의 주소
+#   spring-core   http://localhost:8080
+#   python worker http://localhost:8000
+#   Kafka         localhost:29092  (컨테이너 내부는 kafka:9092)
+#   PostgreSQL    localhost:5432
+#   Redis         localhost:6379
+
+name: fortune-msa
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fortune-postgres
+    environment:
+      POSTGRES_DB: fortune
+      POSTGRES_USER: fortune
+      POSTGRES_PASSWORD: fortune
+      TZ: Asia/Seoul
+      PGTZ: Asia/Seoul
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fortune -d fortune -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: fortune-redis
+    # maxmemory-policy=noeviction 이 중요하다:
+    # allkeys-lru 로 두면 멱등성 키/락이 밀려나 이중 결제 방어가 뚫릴 수 있다.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: fortune-kafka
+    # KRaft 단일 노드: Zookeeper 없이 바로 뜬다.
+    environment:
+      CLUSTER_ID: fortune-msa-cluster
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_HOURS: 168
+      TZ: Asia/Seoul
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+    restart: unless-stopped
+
+  spring-core:
+    build:
+      context: ./spring-core
+    container_name: fortune-spring-core
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/fortune
+      DB_USERNAME: fortune
+      DB_PASSWORD: fortune
+      DB_POOL_SIZE: "20"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DATABASE: "0"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      INTERNAL_API_TOKEN: local-internal-token
+      RATE_LIMIT_REQUESTS: "100"
+      TZ: Asia/Seoul
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health/readiness >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 45s
+    restart: unless-stopped
+
+  python-ai-worker:
+    build:
+      context: ./python-ai-worker
+    container_name: fortune-python-worker
+    environment:
+      FORTUNE_KAFKA__BOOTSTRAP_SERVERS: kafka:9092
+      FORTUNE_KAFKA__TOPIC: fortune.paid
+      FORTUNE_KAFKA__DLQ_TOPIC: fortune.paid.dlq
+      FORTUNE_REDIS__URL: redis://redis:6379/1
+      FORTUNE_INTERNAL_API__BASE_URL: http://spring-core:8080
+      FORTUNE_INTERNAL_API__TOKEN: local-internal-token
+      FORTUNE_LLM__PROVIDER: mock
+      FORTUNE_SERVICE__ENV: docker
+      TZ: Asia/Seoul
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      spring-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:
